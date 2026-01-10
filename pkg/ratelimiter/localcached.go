@@ -80,6 +80,7 @@ type LocalCachedLimiter struct {
 	mu        sync.Mutex
 	fetching  bool
 	fetchCond *sync.Cond
+	waiters   int64 // Track waiting goroutines for dynamic batching
 
 	config types.RateLimiterConfig
 }
@@ -134,7 +135,9 @@ func (l *LocalCachedLimiter) AllowN(ctx context.Context, key string, n int64) (*
 		// If someone else is fetching, wait.
 		if l.fetching {
 			startWait := time.Now()
+			l.waiters++
 			l.fetchCond.Wait()
+			l.waiters--
 			if l.metrics != nil {
 				l.metrics.RecordTokenFetchWait(time.Since(startWait))
 			}
@@ -144,10 +147,18 @@ func (l *LocalCachedLimiter) AllowN(ctx context.Context, key string, n int64) (*
 
 		// 4. We are the fetcher
 		l.fetching = true
+
+		// Dynamic Batching: If we have many waiters, try to fetch enough for all of them
+		// to avoid thundering herd loops (waking up 1000 people for 100 tokens).
+		batchSize := l.prefetchCount
+		if l.waiters > batchSize {
+			batchSize = l.waiters
+		}
+
 		l.mu.Unlock()
 
 		// Perform Fetch (outside lock)
-		granted, retryAfter, fetchLatency := l.performFetch()
+		granted, retryAfter, fetchLatency := l.performFetch(batchSize)
 
 		if l.metrics != nil {
 			l.metrics.RecordRemoteTokenFetch(fetchLatency)
@@ -171,7 +182,7 @@ func (l *LocalCachedLimiter) AllowN(ctx context.Context, key string, n int64) (*
 	}
 }
 
-func (l *LocalCachedLimiter) performFetch() (int64, time.Duration, time.Duration) {
+func (l *LocalCachedLimiter) performFetch(n int64) (int64, time.Duration, time.Duration) {
 	start := time.Now()
 
 	// Simulate Network Delay
@@ -185,7 +196,7 @@ func (l *LocalCachedLimiter) performFetch() (int64, time.Duration, time.Duration
 		time.Sleep(delay)
 	}
 
-	granted, retryAfter := l.remote.RequestTokens(l.prefetchCount)
+	granted, retryAfter := l.remote.RequestTokens(n)
 	latency := time.Since(start)
 
 	return granted, retryAfter, latency
