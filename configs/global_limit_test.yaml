@@ -1,0 +1,41 @@
+# Test: Rate limiting with processing delay AND rejected request delay
+# Tests both successful request processing time and rate-limited request delay
+
+clients:
+  count: 100                     # 100 concurrent clients
+  requests_per_client: 50000     # Enough for the test
+  connection_mode: "reuse"
+  max_concurrency: 100
+  request_rate: 0                # Unlimited
+  headers:
+    X-User-ID: "global-user"     # Global rate limit
+
+servers:
+  count: 5
+  max_requests_per_conn: 150
+  base_port: 8080
+  processing_time_ms: 2          # 2ms for successful requests
+  processing_time_jitter_ms: 1   # 1-3ms total
+  rejected_delay_ms: 1           # 1ms delay for rate-limited requests
+  rejected_delay_jitter_ms: 0    # No jitter
+  rate_limit_header_keys:
+    - "X-User-ID"
+
+load_balancer:
+  algorithm: "round_robin"
+  max_conn_per_server: 50000
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 10000                    # 10,000 QPS global limit
+  burst: 1000
+  shards: 256
+
+simulation:
+  duration_seconds: 30           # 30 seconds
+  warmup_seconds: 2
+  ramp_up_seconds: 0
+
+metrics:
+  enabled: true
+  interval_seconds: 5

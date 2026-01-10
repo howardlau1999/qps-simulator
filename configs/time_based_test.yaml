@@ -1,0 +1,42 @@
+# Test: Time-based testing with JSON metrics output
+# Outputs metrics.json for visualization in dashboard.html
+
+clients:
+  count: 50
+  requests_per_client: 0         # Use time instead
+  test_time_seconds: 20
+  connection_mode: "reuse"
+  max_concurrency: 100
+  request_rate: 0
+  headers:
+    X-User-ID: "global-user"
+
+servers:
+  count: 5
+  max_requests_per_conn: 150
+  base_port: 8080
+  processing_time_ms: 2
+  processing_time_jitter_ms: 1
+  rejected_delay_ms: 1
+  rate_limit_header_keys:
+    - "X-User-ID"
+
+load_balancer:
+  algorithm: "round_robin"
+  max_conn_per_server: 50000
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 10000
+  burst: 1000
+  shards: 256
+
+simulation:
+  duration_seconds: 30
+  warmup_seconds: 2
+  ramp_up_seconds: 0
+
+metrics:
+  enabled: true
+  interval_seconds: 1
+  output_path: "metrics.json"    # Output JSON file for visualization

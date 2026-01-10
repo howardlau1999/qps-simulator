@@ -1,0 +1,45 @@
+clients:
+  count: 300
+  requests_per_client: 0 # Unlimited
+  connection_mode: "reuse"
+  request_rate: 0
+  max_concurrency: 100
+  headers:
+    "X-User-ID": "user-{{.ClientID}}"
+
+servers:
+  count: 10
+  max_requests_per_conn: 150
+  processing_time_ms: 3
+  processing_time_jitter_ms: 1
+  rejected_delay_ms: 2
+  rejected_delay_jitter_ms: 1
+  # Inject 10ms delay into rate limit check
+  rate_limit_check_delay_ms: 10
+  rate_limit_check_jitter_ms: 2
+  rate_limit_header_keys:
+    - "X-User-ID"
+
+load_balancer:
+  algorithm: "round_robin"
+  health_check_ms: 1000
+  max_conn_per_server: 10000
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 10000
+  burst: 10000
+  window_ms: 1000
+  shards: 256
+
+simulation:
+  duration_seconds: 15
+  warmup_seconds: 2
+  ramp_up_seconds: 1
+  stop_on_error: false
+
+metrics:
+  enabled: true
+  interval_seconds: 1
+  output_format: "json"
+  output_path: "./metrics_delayed.json"

@@ -1,0 +1,63 @@
+# QPS Simulator Sample Configuration
+# This configuration demonstrates all available options
+
+clients:
+  count: 10                      # Number of concurrent clients
+  requests_per_client: 10000     # Requests each client will send
+  connection_mode: "hybrid"       # reuse, per_request, or hybrid
+  max_concurrency: 100           # Max concurrent requests per client
+  request_rate: 1000             # Target requests per second per client
+  headers:
+    X-API-Key: "api-key-001"
+    X-Tenant: "tenant-001"
+
+servers:
+  count: 3                       # Number of backend servers
+  max_requests_per_conn: 150     # Max requests before connection close
+  base_port: 8080                # Starting port for servers
+  processing_time_ms: 1          # Simulated processing time
+  processing_time_jitter_ms: 0   # Random jitter added to processing time
+  rate_limit_header_keys:        # Headers used for rate limiting
+    - "X-User-ID"
+    - "X-API-Key"
+
+load_balancer:
+  algorithm: "round_robin"       # round_robin, random, weighted, least_conn
+  health_check_ms: 1000          # Health check interval
+  max_conn_per_server: 10000     # Maximum connections per server
+
+rate_limiter:
+  type: "token_bucket"           # token_bucket, sliding_window, fixed_window, leaky_bucket
+  rate: 10000                    # Requests per second
+  burst: 1000                    # Burst capacity
+  window_ms: 1000                # Window size for window-based algorithms
+  shards: 256                    # Shards for high-concurrency (1M+ QPS)
+  key_template: "{{.X-User-ID}}" # Template for rate limit key
+
+rate_limiter_service:
+  enabled: false                 # Enable centralized rate limiting
+  address: "localhost:9090"      # Rate limiter service address
+  tls_enabled: false             # Enable TLS
+  timeout_ms: 10                 # RPC timeout
+
+simulation:
+  duration_seconds: 60           # Total simulation duration
+  warmup_seconds: 5              # Warmup period (metrics not collected)
+  ramp_up_seconds: 10            # Gradual ramp-up of load
+  stop_on_error: false           # Stop on first error
+
+metrics:
+  enabled: true
+  interval_seconds: 1            # Metrics reporting interval
+  output_format: "json"          # json, csv, prometheus
+  output_path: "./metrics"       # Output directory
+  histogram_buckets:             # Latency histogram buckets (seconds)
+    - 0.001
+    - 0.005
+    - 0.01
+    - 0.025
+    - 0.05
+    - 0.1
+    - 0.25
+    - 0.5
+    - 1.0

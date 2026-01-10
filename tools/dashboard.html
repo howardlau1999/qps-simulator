@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QPS Simulator - Metrics Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent: #3b82f6;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            color: var(--text-secondary);
+        }
+
+        .file-input-container {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .file-input {
+            padding: 1rem 2rem;
+            background: var(--bg-secondary);
+            border: 2px dashed var(--accent);
+            border-radius: 12px;
+            cursor: pointer;
+            color: var(--text-primary);
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        body.drag-over {
+            border: 4px dashed var(--accent);
+            background: var(--bg-secondary);
+        }
+
+        .file-input:hover {
+            background: var(--bg-card);
+            border-color: #8b5cf6;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            padding: 1.5rem;
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-4px);
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-card.success .stat-value {
+            color: var(--success);
+        }
+
+        .stat-card.warning .stat-value {
+            color: var(--warning);
+        }
+
+        .stat-card.danger .stat-value {
+            color: var(--danger);
+        }
+
+        .stat-card.accent .stat-value {
+            color: var(--accent);
+        }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2rem;
+        }
+
+        .chart-card {
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            padding: 1.5rem;
+        }
+
+        .chart-card h3 {
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+
+        .chart-container {
+            position: relative;
+            height: 400px;
+        }
+
+        .config-section {
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .config-section h3 {
+            margin-bottom: 1rem;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1rem;
+        }
+
+        .config-item {
+            background: var(--bg-card);
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+        }
+
+        .config-item .label {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+        }
+
+        .config-item .value {
+            font-size: 1.125rem;
+            font-weight: 600;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .chart-container {
+                height: 250px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>📊 QPS Simulator Dashboard</h1>
+        <p>Rate Limiting Performance Visualization</p>
+    </div>
+
+    <div class="file-input-container">
+        <input type="file" id="fileInput" class="file-input" accept=".json">
+        <p style="margin-top: 0.5rem; color: var(--text-secondary);">
+            Load a metrics JSON file from the simulator
+        </p>
+    </div>
+
+    <div id="dashboard" class="hidden">
+        <div class="config-section">
+            <h3>🔧 Configuration</h3>
+            <div class="config-grid" id="configGrid"></div>
+        </div>
+
+        <div class="stats-grid" id="statsGrid"></div>
+
+        <div class="charts-grid">
+            <div class="chart-card">
+                <h3>📈 Requests Over Time</h3>
+                <div class="chart-container">
+                    <canvas id="requestsChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <h3>⏱️ Latency Percentiles</h3>
+                <div class="chart-container">
+                    <canvas id="latencyChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <h3>🔗 Connections</h3>
+                <div class="chart-container">
+                    <canvas id="connectionsChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <h3>📊 Request Distribution</h3>
+                <div class="chart-container">
+                    <canvas id="distributionChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let charts = {};
+
+        // Configure global chart interactions
+        Chart.defaults.interaction.mode = 'index';
+        Chart.defaults.interaction.intersect = false;
+
+        // Plugin to draw vertical line on hover
+        const verticalLinePlugin = {
+            id: 'verticalLine',
+            afterDraw: (chart) => {
+                if (chart.tooltip?._active?.length) {
+                    const x = chart.tooltip._active[0].element.x;
+                    const yAxis = chart.scales.y;
+                    const ctx = chart.ctx;
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.moveTo(x, yAxis.top);
+                    ctx.lineTo(x, yAxis.bottom);
+                    ctx.lineWidth = 1;
+                    ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)';
+                    ctx.setLineDash([5, 5]);
+                    ctx.stroke();
+                    ctx.restore();
+                }
+            }
+        };
+        Chart.register(verticalLinePlugin);
+
+        // Drag and Drop
+        document.body.addEventListener('dragover', e => {
+            e.preventDefault();
+            document.body.classList.add('drag-over');
+        });
+
+        document.body.addEventListener('dragleave', e => {
+            e.preventDefault();
+            document.body.classList.remove('drag-over');
+        });
+
+        document.body.addEventListener('drop', e => {
+            e.preventDefault();
+            document.body.classList.remove('drag-over');
+
+            const file = e.dataTransfer.files[0];
+            if (file && file.name.endsWith('.json')) {
+                loadFile(file);
+            } else {
+                alert('Please drop a .json metrics file');
+            }
+        });
+
+        function loadFile(file) {
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    renderDashboard(data);
+                } catch (err) {
+                    alert('Error parsing JSON file: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        document.getElementById('fileInput').addEventListener('change', function (e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            loadFile(file);
+        });
+
+        function formatNumber(num) {
+            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+            return num.toString();
+        }
+
+        function formatDuration(ns) {
+            const ms = ns / 1000000;
+            if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+            if (ms >= 1) return ms.toFixed(2) + 'ms';
+            return (ms * 1000).toFixed(0) + 'µs';
+        }
+
+        function renderDashboard(data) {
+            document.getElementById('dashboard').classList.remove('hidden');
+
+            // Render config
+            const configGrid = document.getElementById('configGrid');
+            const config = data.config;
+            configGrid.innerHTML = `
+                <div class="config-item"><div class="label">Clients</div><div class="value">${config.client_count}</div></div>
+                <div class="config-item"><div class="label">Servers</div><div class="value">${config.server_count}</div></div>
+                <div class="config-item"><div class="label">Connection Mode</div><div class="value">${config.connection_mode}</div></div>
+                <div class="config-item"><div class="label">Rate Limiter</div><div class="value">${config.rate_limiter_type}</div></div>
+                <div class="config-item"><div class="label">Rate Limit</div><div class="value">${formatNumber(config.rate_limit_rate)}/s</div></div>
+                <div class="config-item"><div class="label">Max Req/Conn</div><div class="value">${config.max_requests_per_conn}</div></div>
+                <div class="config-item"><div class="label">Duration</div><div class="value">${config.duration_seconds}s</div></div>
+            `;
+
+            // Render stats
+            const final = data.final_result;
+            const statsGrid = document.getElementById('statsGrid');
+            statsGrid.innerHTML = `
+                <div class="stat-card accent"><div class="stat-value">${formatNumber(final.total_requests)}</div><div class="stat-label">Total Requests</div></div>
+                <div class="stat-card success"><div class="stat-value">${formatNumber(final.successful_requests)}</div><div class="stat-label">Successful</div></div>
+                <div class="stat-card warning"><div class="stat-value">${formatNumber(final.rate_limited_requests)}</div><div class="stat-label">Rate Limited</div></div>
+                <div class="stat-card danger"><div class="stat-value">${formatNumber(final.failed_requests)}</div><div class="stat-label">Failed</div></div>
+                <div class="stat-card"><div class="stat-value">${Math.round(final.requests_per_second).toLocaleString()}</div><div class="stat-label">Avg QPS</div></div>
+                <div class="stat-card"><div class="stat-value">${formatDuration(final.avg_latency_ns)}</div><div class="stat-label">Avg Latency</div></div>
+                <div class="stat-card"><div class="stat-value">${Math.round(final.success_qps).toLocaleString()}</div><div class="stat-label">Avg Success QPS</div></div>
+                <div class="stat-card"><div class="stat-value">${formatDuration(final.avg_success_latency_ns)}</div><div class="stat-label">Avg Success Latency</div></div>
+            `;
+
+            // Render charts
+            renderCharts(data);
+        }
+
+        function renderCharts(data) {
+            const snapshots = data.snapshots;
+            // Use actual duration from snapshot for labels (converted to seconds)
+            const labels = snapshots.map(s => (s.duration_ns / 1000000000).toFixed(1) + 's');
+
+            // Destroy existing charts
+            Object.values(charts).forEach(c => c.destroy());
+
+            // Requests chart (QPS)
+            charts.requests = new Chart(document.getElementById('requestsChart'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Success QPS',
+                            data: snapshots.map(s => s.success_qps),
+                            borderColor: '#22c55e',
+                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Rejected QPS',
+                            data: snapshots.map(s => s.rejected_qps),
+                            borderColor: '#f59e0b',
+                            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Total QPS',
+                            data: snapshots.map(s => s.requests_per_second),
+                            borderColor: '#3b82f6',
+                            borderDash: [5, 5],
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: { display: true, text: 'Queries Per Second (QPS)', color: '#94a3b8' },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } },
+                        y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } }
+                    }
+                }
+            });
+
+            // Latency chart
+            charts.latency = new Chart(document.getElementById('latencyChart'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Avg Success',
+                            data: snapshots.map(s => s.avg_success_latency_ns / 1000000),
+                            borderColor: '#22c55e',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Avg Rejected',
+                            data: snapshots.map(s => s.avg_rejected_latency_ns / 1000000),
+                            borderColor: '#f59e0b',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Avg RL Check',
+                            data: snapshots.map(s => (s.avg_rate_limit_check_latency_ns || 0) / 1000000),
+                            borderColor: '#8b5cf6',
+                            borderDash: [2, 2],
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Avg Fetch',
+                            data: snapshots.map(s => (s.avg_remote_fetch_latency_ns || 0) / 1000000),
+                            borderColor: '#ec4899', // Pink
+                            borderDash: [5, 5],
+                            tension: 0.4 // No trailing comma here
+                        },
+                        {
+                            label: 'P99 Success',
+                            data: snapshots.map(s => s.p99_success_latency_ns / 1000000),
+                            borderColor: '#16a34a', // Darker green
+                            borderDash: [5, 5],
+                            tension: 0.4
+                        },
+                        {
+                            label: 'P99 Rejected',
+                            data: snapshots.map(s => s.p99_rejected_latency_ns / 1000000),
+                            borderColor: '#d97706', // Darker amber
+                            borderDash: [5, 5],
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: { display: true, text: 'Latency (ms)', color: '#94a3b8' },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } },
+                        y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } }
+                    }
+                }
+            });
+
+            // Connections chart
+            charts.connections = new Chart(document.getElementById('connectionsChart'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Active',
+                            data: snapshots.map(s => s.active_connections || 0),
+                            borderColor: '#3b82f6',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'New',
+                            data: snapshots.map(s => s.total_connections || 0),
+                            borderColor: '#22c55e',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Closed',
+                            data: snapshots.map(s => s.closed_connections || 0),
+                            borderColor: '#ef4444',
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { labels: { color: '#94a3b8' } } },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } },
+                        y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } }
+                    }
+                }
+            });
+
+            // Distribution chart
+            const final = data.final_result;
+            charts.distribution = new Chart(document.getElementById('distributionChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: ['Successful', 'Rate Limited', 'Failed'],
+                    datasets: [{
+                        data: [final.successful_requests, final.rate_limited_requests, final.failed_requests],
+                        backgroundColor: ['#22c55e', '#f59e0b', '#ef4444'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 20 } }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+
+</html>

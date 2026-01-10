@@ -1,0 +1,22 @@
+# Binaries
+/simulator
+simulator.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs and Metrics
+*.log
+*.json
+*.csv
+metrics_*.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Dependency directories
+vendor/

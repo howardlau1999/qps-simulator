@@ -1,0 +1,39 @@
+clients:
+  count: 300
+  requests_per_client: 0    # Unlimited
+  test_time_seconds: 30     # Run for 15 seconds
+  connection_mode: "reuse"
+  request_rate: 0
+  headers:
+    X-User-ID: "static-user" # Use single user to force contention/rate limiting
+
+servers:
+  count: 10
+  max_requests_per_conn: 150
+  base_port: 8080
+  processing_time_ms: 10
+  processing_time_jitter_ms: 5
+  rate_limit_header_keys: ["X-User-ID"]
+  remote_check_delay_ms: 10    # 10ms delay for remote fetch
+  remote_check_jitter_ms: 2    # +/- 2ms jitter
+  rejected_delay_ms: 5       # 5ms delay on rejection
+  rejected_delay_jitter_ms: 2 # +/- 2ms jitter on rejection
+
+load_balancer:
+  algorithm: "round_robin"
+  health_check_ms: 1000
+  max_conn_per_server: 10000
+
+rate_limiter:
+  type: "local_cached"
+  rate: 5000               # Global limit 5000 RPS
+  burst: 1000              # Burst 1000
+  window_ms: 1000
+  prefetch_count: 50       # Each fetch gets 50 tokens
+  key_template: "{{.X-User-ID}}"
+
+metrics:
+  enabled: true
+  interval_seconds: 1
+  output_format: "json"
+  output_path: "./metrics_local_cached.json"

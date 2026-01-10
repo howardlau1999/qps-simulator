@@ -1,0 +1,38 @@
+# Test: Unlimited client QPS, servers limit to 10,000 QPS
+# This tests the rate limiter's ability to enforce server-side limits
+
+clients:
+  count: 20                      # 20 concurrent clients
+  requests_per_client: 100000    # 2M total requests - enough to run for a while
+  connection_mode: "reuse"       # Fast connection reuse
+  max_concurrency: 100
+  request_rate: 0                # 0 = unlimited, send as fast as possible
+  headers:
+    X-API-Key: "unlimited-test"
+
+servers:
+  count: 3
+  max_requests_per_conn: 150
+  base_port: 8080
+  processing_time_ms: 0          # No processing delay
+  rate_limit_header_keys:
+    - "X-User-ID"
+
+load_balancer:
+  algorithm: "round_robin"
+  max_conn_per_server: 50000
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 10000                    # 10,000 QPS limit (per user key)
+  burst: 500                     # Smaller burst
+  shards: 256                    # High shards for performance
+
+simulation:
+  duration_seconds: 15           # Run for 15 seconds
+  warmup_seconds: 1
+  ramp_up_seconds: 0
+
+metrics:
+  enabled: true
+  interval_seconds: 1
