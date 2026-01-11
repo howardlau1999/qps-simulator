@@ -16,47 +16,47 @@ type ContextKey string
 // WorkerIDKey is the context key for the worker ID
 const WorkerIDKey ContextKey = "worker_id"
 
+// DedicatedConnKey is the context key for the dedicated connection
+const DedicatedConnKey ContextKey = "dedicated_conn"
+
 // Client represents an HTTP client simulator
 type Client struct {
-	id             string
-	loadBalancer   types.LoadBalancer
-	pool           *Pool
-	mode           types.ConnectionMode
-	modeMu         sync.RWMutex
-	stats          clientStats
-	headers        map[string]string
+	id                 string
+	loadBalancer       types.LoadBalancer
+	pool               *Pool
+	mode               types.ConnectionMode
+	modeMu             sync.RWMutex
+	stats              clientStats
+	headers            map[string]string
 	maxRequestsPerConn int64
-	closed         bool
-	closeMu        sync.RWMutex
-	transport      Transport
-	sem            chan struct{} // Semaphore for concurrency limiting
-	
-	dedicatedConns map[int]types.Connection // Map of workerID to persistent connection
-	dedicatedMu    sync.Mutex
+	closed             bool
+	closeMu            sync.RWMutex
+	transport          Transport
+	sem                chan struct{} // Semaphore for concurrency limiting
 }
 
 type clientStats struct {
-	totalRequests      int64
-	successfulRequests int64
+	totalRequests       int64
+	successfulRequests  int64
 	rateLimitedRequests int64
-	failedRequests     int64
-	connectionsOpened  int64
-	connectionsClosed  int64
-	totalLatencyNs     int64
+	failedRequests      int64
+	connectionsOpened   int64
+	connectionsClosed   int64
+	totalLatencyNs      int64
 }
 
 // ClientConfig holds client configuration
 type ClientConfig struct {
-	ID                 string
-	LoadBalancer       types.LoadBalancer
-	ConnectionMode     types.ConnectionMode
+	ID                     string
+	LoadBalancer           types.LoadBalancer
+	ConnectionMode         types.ConnectionMode
 	ConnectionPoolStrategy string
-	MaxConnsPerServer  int
-	MaxRequestsPerConn int64
-	Headers            map[string]string
-	Transport          Transport
-	MaxConcurrency     int
-	MaxConnections     int
+	MaxConnsPerServer      int
+	MaxRequestsPerConn     int64
+	Headers                map[string]string
+	Transport              Transport
+	MaxConcurrency         int
+	MaxConnections         int
 }
 
 // NewClient creates a new HTTP client simulator
@@ -73,7 +73,6 @@ func NewClient(config ClientConfig) *Client {
 		sem = make(chan struct{}, config.MaxConcurrency)
 	}
 
-
 	return &Client{
 		id:                 config.ID,
 		loadBalancer:       config.LoadBalancer,
@@ -83,7 +82,6 @@ func NewClient(config ClientConfig) *Client {
 		maxRequestsPerConn: config.MaxRequestsPerConn,
 		transport:          config.Transport,
 		sem:                sem,
-		dedicatedConns:     make(map[int]types.Connection),
 	}
 }
 
@@ -102,6 +100,24 @@ func (c *Client) ConnectionMode() types.ConnectionMode {
 	c.modeMu.RLock()
 	defer c.modeMu.RUnlock()
 	return c.mode
+}
+
+// CreateDedicatedConnection creates a connection for a worker
+// Returns the connection for the caller to manage
+func (c *Client) CreateDedicatedConnection(ctx context.Context) (types.Connection, error) {
+	// Pick a server and create connection
+	server, err := c.loadBalancer.PickServer()
+	if err != nil {
+		return nil, fmt.Errorf("failed to pick server: %w", err)
+	}
+
+	conn, err := c.pool.Create(ctx, server.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection: %w", err)
+	}
+	atomic.AddInt64(&c.stats.connectionsOpened, 1)
+
+	return conn, nil
 }
 
 // Send sends a request to a server selected by the load balancer
@@ -154,67 +170,43 @@ func (c *Client) Send(ctx context.Context, req *types.Request) (*types.Response,
 	}
 
 	if mode == types.ConnectionModeDedicated {
-		// Dedicated persistent connection per worker logic
-		workerIDVal := ctx.Value(WorkerIDKey)
-		if workerIDVal == nil {
-			return nil, fmt.Errorf("worker_id not found in context for dedicated connection mode")
-		}
-		workerID, ok := workerIDVal.(int)
-		if !ok {
-			return nil, fmt.Errorf("invalid worker_id type in context")
-		}
-		
-		c.dedicatedMu.Lock()
-		existingConn, exists := c.dedicatedConns[workerID]
-		valid := false
-		if exists && existingConn != nil {
+		// Get connection from context (worker manages its own connection)
+		connVal := ctx.Value(DedicatedConnKey)
+		if connVal == nil {
+			// No connection yet, create one
+			conn, err = c.CreateDedicatedConnection(ctx)
+			if err != nil {
+				atomic.AddInt64(&c.stats.failedRequests, 1)
+				return nil, err
+			}
+		} else {
+			conn = connVal.(types.Connection)
 			// Check if connection is still valid
-			if !existingConn.ShouldClose() {
-				valid = true
-				conn = existingConn
-			} else {
-				// Clean up old connection
-				existingConn.Close()
+			if conn.ShouldClose() {
+				conn.Close()
 				atomic.AddInt64(&c.stats.connectionsClosed, 1)
-				delete(c.dedicatedConns, workerID)
+				// Create replacement
+				conn, err = c.CreateDedicatedConnection(ctx)
+				if err != nil {
+					atomic.AddInt64(&c.stats.failedRequests, 1)
+					return nil, err
+				}
 			}
 		}
-		c.dedicatedMu.Unlock()
-		
-		if !valid {
-			// Create new connection
-			server, err := c.loadBalancer.PickServer()
-			if err != nil {
-				atomic.AddInt64(&c.stats.failedRequests, 1)
-				return nil, fmt.Errorf("failed to pick server: %w", err)
-			}
-			
-			conn, err = c.pool.Create(ctx, server.ID)
-			if err != nil {
-				atomic.AddInt64(&c.stats.failedRequests, 1)
-				return nil, fmt.Errorf("failed to create connection: %w", err)
-			}
-			atomic.AddInt64(&c.stats.connectionsOpened, 1)
-			
-			// Store in map
-			c.dedicatedMu.Lock()
-			c.dedicatedConns[workerID] = conn
-			c.dedicatedMu.Unlock()
-		}
-		
+
 		// Use the connection
 		// Note: We don't set usePool = true, so we handle cleanup delicately below
 	} else if usePool {
-        // Define picker closure to lazy-load server
-        picker := func() (string, error) {
-            // Pick server first
-            server, err := c.loadBalancer.PickServer()
-            if err != nil {
-                return "", err
-            }
-            return server.ID, nil
-        }
-    
+		// Define picker closure to lazy-load server
+		picker := func() (string, error) {
+			// Pick server first
+			server, err := c.loadBalancer.PickServer()
+			if err != nil {
+				return "", err
+			}
+			return server.ID, nil
+		}
+
 		conn, err = c.pool.Get(ctx, picker)
 		if err != nil {
 			atomic.AddInt64(&c.stats.failedRequests, 1)
@@ -223,12 +215,12 @@ func (c *Client) Send(ctx context.Context, req *types.Request) (*types.Response,
 		atomic.AddInt64(&c.stats.connectionsOpened, 1)
 	} else {
 		// Create a new connection for this request
-        // Must pick server explicitly here
-        server, err := c.loadBalancer.PickServer()
-        if err != nil {
-            atomic.AddInt64(&c.stats.failedRequests, 1)
-            return nil, fmt.Errorf("failed to pick server: %w", err)
-        }
+		// Must pick server explicitly here
+		server, err := c.loadBalancer.PickServer()
+		if err != nil {
+			atomic.AddInt64(&c.stats.failedRequests, 1)
+			return nil, fmt.Errorf("failed to pick server: %w", err)
+		}
 
 		conn, err = c.pool.Create(ctx, server.ID)
 		if err != nil {
@@ -264,28 +256,28 @@ func (c *Client) Send(ctx context.Context, req *types.Request) (*types.Response,
 
 	// Handle connection close instruction from server
 	if resp.ShouldClose || conn.ShouldClose() {
-		if usePool {
-			c.pool.Put(conn) // Pool will handle the close
-		} else {
+		if mode == types.ConnectionModeDedicated {
+			// For dedicated mode, just close - worker will create new one on next Send
+			// The new connection will be created because context won't have it, or ShouldClose check
 			conn.Close()
-		}
-		atomic.AddInt64(&c.stats.connectionsClosed, 1)
-	} else if usePool {
-		c.pool.Put(conn)
-	} else if mode == types.ConnectionModeDedicated {
-		// For dedicated mode, we DO NOT close or put back to pool unless it SHOULD close
-		if resp.ShouldClose || conn.ShouldClose() {
-			c.dedicatedMu.Lock()
-			delete(c.dedicatedConns, ctx.Value(WorkerIDKey).(int))
-			c.dedicatedMu.Unlock()
+			atomic.AddInt64(&c.stats.connectionsClosed, 1)
+			// Set flag in response so worker knows to update its local connection
+			resp.ShouldClose = true
+		} else if usePool {
+			c.pool.Put(conn) // Pool will handle the close
+			atomic.AddInt64(&c.stats.connectionsClosed, 1)
+		} else {
 			conn.Close()
 			atomic.AddInt64(&c.stats.connectionsClosed, 1)
 		}
-		// If not closing, it stays in the map for next time.
-	} else {
+	} else if usePool {
+		c.pool.Put(conn)
+	} else if mode != types.ConnectionModeDedicated {
+		// For non-dedicated, non-pool modes: close
 		conn.Close()
 		atomic.AddInt64(&c.stats.connectionsClosed, 1)
 	}
+	// For dedicated mode without close: connection stays valid for next request
 
 	resp.ProcessingTime = latency
 	return resp, nil
@@ -315,13 +307,7 @@ func (c *Client) Close() error {
 	c.closeMu.Lock()
 	c.closed = true
 	c.closeMu.Unlock()
-	
-	c.dedicatedMu.Lock()
-	for _, conn := range c.dedicatedConns {
-		conn.Close()
-	}
-	c.dedicatedConns = nil
-	c.dedicatedMu.Unlock()
-	
+
+	// Note: dedicated connections are managed by workers, they will be closed when workers exit
 	return c.pool.Close()
 }

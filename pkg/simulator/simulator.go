@@ -24,11 +24,11 @@ type Simulator struct {
 	loadBalancer  types.LoadBalancer
 	metrics       *metrics.Collector
 	metricsWriter *metrics.FileWriter
-	
-	running      bool
-	runMu        sync.RWMutex
-	stopCh       chan struct{}
-	
+
+	running bool
+	runMu   sync.RWMutex
+	stopCh  chan struct{}
+
 	requestCount int64
 }
 
@@ -69,13 +69,13 @@ func New(cfg *config.Config) (*Simulator, error) {
 	servers := make([]*server.Server, cfg.Servers.Count)
 	for i := 0; i < cfg.Servers.Count; i++ {
 		serverConfig := server.ServerConfig{
-			ID:                 fmt.Sprintf("server-%d", i),
-			Address:            "localhost",
-			Port:               cfg.Servers.BasePort + i,
-			MaxRequestsPerConn: int64(cfg.Servers.MaxRequestsPerConn),
-			RateLimitKeys:      cfg.Servers.RateLimitHeaderKeys,
-			ProcessingTimeMs:   cfg.Servers.ProcessingTimeMs,
-			ProcessingJitterMs: cfg.Servers.ProcessingTimeJitter,
+			ID:                     fmt.Sprintf("server-%d", i),
+			Address:                "localhost",
+			Port:                   cfg.Servers.BasePort + i,
+			MaxRequestsPerConn:     int64(cfg.Servers.MaxRequestsPerConn),
+			RateLimitKeys:          cfg.Servers.RateLimitHeaderKeys,
+			ProcessingTimeMs:       cfg.Servers.ProcessingTimeMs,
+			ProcessingJitterMs:     cfg.Servers.ProcessingTimeJitter,
 			RejectedDelayMs:        cfg.Servers.RejectedDelayMs,
 			RejectedJitterMs:       cfg.Servers.RejectedDelayJitter,
 			RateLimitCheckDelayMs:  cfg.Servers.RateLimitCheckDelayMs,
@@ -131,26 +131,26 @@ func New(cfg *config.Config) (*Simulator, error) {
 	clients := make([]*client.Client, cfg.Clients.Count)
 	for i := 0; i < cfg.Clients.Count; i++ {
 		clientConfig := client.ClientConfig{
-			ID:                 fmt.Sprintf("client-%d", i),
-			LoadBalancer:       lb,
-			ConnectionMode:     connMode,
+			ID:                     fmt.Sprintf("client-%d", i),
+			LoadBalancer:           lb,
+			ConnectionMode:         connMode,
 			ConnectionPoolStrategy: cfg.Clients.ConnectionPoolStrategy,
-			MaxConnsPerServer:  cfg.LoadBalancer.MaxConnPerServer / cfg.Clients.Count,
-			MaxRequestsPerConn: int64(cfg.Servers.MaxRequestsPerConn),
-			Headers:            cfg.Clients.Headers,
-			Transport:          transport,
-			MaxConcurrency:     1, // Force low concurrency for testing skew? No, use config.
+			MaxConnsPerServer:      cfg.LoadBalancer.MaxConnPerServer / cfg.Clients.Count,
+			MaxRequestsPerConn:     int64(cfg.Servers.MaxRequestsPerConn),
+			Headers:                cfg.Clients.Headers,
+			Transport:              transport,
+			MaxConcurrency:         1, // Force low concurrency for testing skew? No, use config.
 		}
-		
+
 		if cfg.Clients.MaxConnections > 0 {
 			// This is now passed as the global limit, not per-server
 			clientConfig.MaxConnections = cfg.Clients.MaxConnections
 		} else {
-             // Default behavior: no global limit? Or derive?
-             // Since we want to support existing behavior where everything was limited per server, 
-             // but if user didn't specify MaxConnections we assume they want per-server limits as configured in load balancer.
-             // But if we want NO global limit by default, we just pass 0.
-        }
+			// Default behavior: no global limit? Or derive?
+			// Since we want to support existing behavior where everything was limited per server,
+			// but if user didn't specify MaxConnections we assume they want per-server limits as configured in load balancer.
+			// But if we want NO global limit by default, we just pass 0.
+		}
 		// Oh, wait, I shouldn't override MaxConcurrency here.
 		clientConfig.MaxConcurrency = cfg.Clients.MaxConcurrency
 		clients[i] = client.NewClient(clientConfig)
@@ -214,7 +214,7 @@ func (s *Simulator) Run(ctx context.Context) error {
 	// Reset metrics after warmup
 	s.metrics.Reset()
 
-	fmt.Printf("Starting simulation for %v with %d clients and %d servers\n", 
+	fmt.Printf("Starting simulation for %v with %d clients and %d servers\n",
 		duration, len(s.clients), len(s.servers))
 
 	// Start metrics reporter
@@ -242,7 +242,7 @@ func (s *Simulator) Run(ctx context.Context) error {
 	if s.metricsWriter != nil {
 		// Add the final snapshot to the list so the graph includes the tail
 		s.metricsWriter.AddSnapshot(*finalSnapshot)
-		
+
 		s.metricsWriter.SetFinalResult(*finalSnapshot)
 		if err := s.metricsWriter.Save(); err != nil {
 			fmt.Printf("Warning: failed to save metrics file: %v\n", err)
@@ -300,7 +300,27 @@ func (s *Simulator) runClient(ctx context.Context, c *client.Client, wg *sync.Wa
 	for i := 0; i < maxConcurrency; i++ {
 		go func(workerID int) {
 			defer workerWg.Done()
+
+			// Worker-local connection for dedicated mode
+			var dedicatedConn types.Connection
 			
+			// Pre-create dedicated connection at startup (only in dedicated mode)
+			if c.ConnectionMode() == types.ConnectionModeDedicated {
+				conn, err := c.CreateDedicatedConnection(ctx)
+				if err != nil {
+					fmt.Printf("Worker %d failed to pre-create connection: %v\n", workerID, err)
+				} else {
+					dedicatedConn = conn
+				}
+			}
+			
+			// Cleanup on exit
+			defer func() {
+				if dedicatedConn != nil {
+					dedicatedConn.Close()
+				}
+			}()
+
 			for {
 				// Check termination conditions
 				if useTimeBased {
@@ -329,12 +349,12 @@ func (s *Simulator) runClient(ctx context.Context, c *client.Client, wg *sync.Wa
 						if res.Allowed {
 							break
 						}
-						
+
 						wait := res.RetryAfter
 						if wait <= 0 {
 							wait = time.Millisecond
 						}
-						
+
 						select {
 						case <-time.After(wait):
 							// Retry loop
@@ -354,14 +374,17 @@ func (s *Simulator) runClient(ctx context.Context, c *client.Client, wg *sync.Wa
 
 				// Add user ID header for rate limiting (can be overridden by config headers)
 				req.Headers["X-User-ID"] = c.ID()
-				
+
 				// Copy config headers (allows override of X-User-ID for global rate limiting)
 				for k, v := range s.config.Clients.Headers {
 					req.Headers[k] = v
 				}
 
-				// Add WorkerID to context
+				// Build context with worker info and dedicated connection
 				ctxWithWorker := context.WithValue(ctx, client.WorkerIDKey, workerID)
+				if dedicatedConn != nil {
+					ctxWithWorker = context.WithValue(ctxWithWorker, client.DedicatedConnKey, dedicatedConn)
+				}
 
 				start := time.Now()
 				resp, err := c.Send(ctxWithWorker, req)
@@ -369,10 +392,28 @@ func (s *Simulator) runClient(ctx context.Context, c *client.Client, wg *sync.Wa
 
 				if err != nil {
 					s.metrics.RecordFailedRequest()
+					// If connection failed, try to recreate for dedicated mode
+					if c.ConnectionMode() == types.ConnectionModeDedicated {
+						newConn, err := c.CreateDedicatedConnection(ctx)
+						if err == nil {
+							dedicatedConn = newConn
+						}
+					}
 					continue
 				}
 
 				s.metrics.RecordRequest(c.ID(), "", latency, resp.RateLimited)
+				
+				// Handle connection replacement for dedicated mode
+				if resp.ShouldClose && c.ConnectionMode() == types.ConnectionModeDedicated {
+					// Connection was closed, create replacement
+					newConn, err := c.CreateDedicatedConnection(ctx)
+					if err == nil {
+						dedicatedConn = newConn
+					} else {
+						dedicatedConn = nil
+					}
+				}
 			}
 		}(i)
 	}
@@ -394,7 +435,7 @@ func (s *Simulator) reportMetrics(ctx context.Context, done <-chan struct{}) {
 	if consoleInterval < tickInterval {
 		tickInterval = consoleInterval
 	}
-	
+
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
@@ -411,13 +452,13 @@ func (s *Simulator) reportMetrics(ctx context.Context, done <-chan struct{}) {
 			snapshot := s.metrics.Snapshot()
 			// Add server connection counts
 			snapshot.ActiveConnections, snapshot.TotalConnections, snapshot.ClosedConnections = s.getConnectionStats()
-			
+
 			// Record to file every 1s
 			if s.metricsWriter != nil && now.Sub(lastFileRecord) >= fileInterval {
 				s.metricsWriter.AddSnapshot(*snapshot)
 				lastFileRecord = now
 			}
-			
+
 			// Report to console at configured interval
 			if now.Sub(lastConsoleReport) >= consoleInterval {
 				fmt.Printf("[%v] %s\n", snapshot.Duration.Round(time.Second), snapshot.String())
@@ -470,6 +511,7 @@ func (s *Simulator) Stop() error {
 func (s *Simulator) GetMetrics() *metrics.MetricsSnapshot {
 	return s.metrics.Snapshot()
 }
+
 // simulatorTransport implements client.Transport
 type simulatorTransport struct {
 	servers []*server.Server

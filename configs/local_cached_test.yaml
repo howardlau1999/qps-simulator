@@ -4,9 +4,9 @@ clients:
   test_time_seconds: 30     # Run for 15 seconds
   connection_mode: "dedicated"
   connection_pool_strategy: "fifo"
-  request_rate: 300
+  request_rate: 0
   max_concurrency: 25
-  max_connections: 100
+  max_connections: 0
   headers:
     X-User-ID: "static-user" # Use single user to force contention/rate limiting
 
