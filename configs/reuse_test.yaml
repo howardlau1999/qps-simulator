@@ -1,0 +1,30 @@
+clients:
+  count: 2
+  requests_per_client: 1000
+  connection_mode: "reuse"
+  request_rate: 100
+  headers:
+    X-API-Key: "test-key"
+
+servers:
+  count: 1
+  max_requests_per_conn: 100000 # High number to force reuse
+  base_port: 9000
+  processing_time_ms: 1
+
+load_balancer:
+  algorithm: "round_robin"
+  max_conn_per_server: 100
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 10000
+  burst: 1000
+
+simulation:
+  duration_seconds: 5
+  warmup_seconds: 0
+
+metrics:
+  enabled: true
+  interval_seconds: 1

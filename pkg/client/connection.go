@@ -10,6 +10,9 @@ import (
 	"github.com/howardlau1999/qps-simulator/pkg/types"
 )
 
+// Transport defines the function signature for sending requests
+type Transport func(ctx context.Context, serverID, connID string, req *types.Request) (*types.Response, error)
+
 // Connection represents a simulated client-server connection
 type Connection struct {
 	id           string
@@ -20,15 +23,17 @@ type Connection struct {
 	closed       bool
 	mu           sync.Mutex
 	createdAt    time.Time
+	transport    Transport
 }
 
 // NewConnection creates a new connection
-func NewConnection(id, serverID string, maxRequests int64) *Connection {
+func NewConnection(id, serverID string, maxRequests int64, transport Transport) *Connection {
 	return &Connection{
 		id:          id,
 		serverID:    serverID,
 		maxRequests: maxRequests,
 		createdAt:   time.Now(),
+		transport:   transport,
 	}
 }
 
@@ -77,13 +82,17 @@ func (c *Connection) Send(ctx context.Context, req *types.Request) (*types.Respo
 
 	shouldClose := c.IncrementRequests()
 
-	// Simulate request processing (this will be handled by server in real simulation)
-	resp := &types.Response{
-		RequestID:   req.ID,
-		StatusCode:  200,
-		Headers:     make(map[string]string),
-		ShouldClose: shouldClose,
-		Timestamp:   time.Now(),
+	if c.transport == nil {
+		return nil, fmt.Errorf("no transport configured")
+	}
+
+	resp, err := c.transport(ctx, c.serverID, c.id, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if shouldClose {
+		resp.ShouldClose = true
 	}
 
 	return resp, nil
@@ -108,6 +117,7 @@ type Pool struct {
 	mu                sync.RWMutex
 	stats             types.ConnectionPoolStats
 	closed            bool
+	transport         Transport
 }
 
 type serverPool struct {
@@ -119,7 +129,7 @@ type serverPool struct {
 }
 
 // NewPool creates a new connection pool
-func NewPool(maxConnsPerServer int, maxRequestsPerConn int64) *Pool {
+func NewPool(maxConnsPerServer int, maxRequestsPerConn int64, transport Transport) *Pool {
 	if maxConnsPerServer <= 0 {
 		maxConnsPerServer = 100
 	}
@@ -131,6 +141,7 @@ func NewPool(maxConnsPerServer int, maxRequestsPerConn int64) *Pool {
 		maxConnsPerServer:  maxConnsPerServer,
 		maxRequestsPerConn: maxRequestsPerConn,
 		pools:              make(map[string]*serverPool),
+		transport:          transport,
 	}
 }
 
@@ -182,7 +193,7 @@ func (p *Pool) Get(ctx context.Context, server *types.ServerInfo) (types.Connect
 
 	// Create new connection
 	connID := fmt.Sprintf("conn-%s-%d", server.ID, atomic.AddInt64(&sp.total, 1))
-	conn := NewConnection(connID, server.ID, p.maxRequestsPerConn)
+	conn := NewConnection(connID, server.ID, p.maxRequestsPerConn, p.transport)
 	atomic.AddInt64(&p.stats.TotalConnections, 1)
 	atomic.AddInt64(&sp.active, 1)
 	return conn, nil

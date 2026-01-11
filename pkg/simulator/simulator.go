@@ -122,6 +122,35 @@ func New(cfg *config.Config) (*Simulator, error) {
 		connMode = types.ConnectionModeReuse
 	}
 
+	// Create transport function to bridge client and server
+	transport := func(ctx context.Context, serverID, connID string, req *types.Request) (*types.Response, error) {
+		// Find the target server
+		var targetServer *server.Server
+		for _, srv := range servers {
+			if srv.ID() == serverID {
+				targetServer = srv
+				break
+			}
+		}
+
+		if targetServer == nil {
+			return nil, fmt.Errorf("server not found: %s", serverID)
+		}
+
+		// Process request through server
+		resp, err := targetServer.HandleRequest(ctx, connID, req)
+		if err != nil {
+			return resp, err
+		}
+
+		// Close connection if server instructs (max requests reached)
+		if resp.ShouldClose {
+			targetServer.CloseConnection(connID)
+		}
+
+		return resp, nil
+	}
+
 	// Create clients
 	clients := make([]*client.Client, cfg.Clients.Count)
 	for i := 0; i < cfg.Clients.Count; i++ {
@@ -132,6 +161,8 @@ func New(cfg *config.Config) (*Simulator, error) {
 			MaxConnsPerServer:  cfg.LoadBalancer.MaxConnPerServer / cfg.Clients.Count,
 			MaxRequestsPerConn: int64(cfg.Servers.MaxRequestsPerConn),
 			Headers:            cfg.Clients.Headers,
+			Transport:          transport,
+			MaxConcurrency:     cfg.Clients.MaxConcurrency,
 		}
 		clients[i] = client.NewClient(clientConfig)
 	}
@@ -292,7 +323,7 @@ func (s *Simulator) runClient(ctx context.Context, c *client.Client, wg *sync.Wa
 		}
 
 		start := time.Now()
-		resp, err := s.sendRequestViaServer(ctx, c, req)
+		resp, err := c.Send(ctx, req)
 		latency := time.Since(start)
 
 		if err != nil {
@@ -307,44 +338,6 @@ func (s *Simulator) runClient(ctx context.Context, c *client.Client, wg *sync.Wa
 			time.Sleep(delay)
 		}
 	}
-}
-
-// sendRequestViaServer routes the request through the simulated server
-func (s *Simulator) sendRequestViaServer(ctx context.Context, c *client.Client, req *types.Request) (*types.Response, error) {
-	// Pick a server via load balancer
-	serverInfo, err := s.loadBalancer.PickServer()
-	if err != nil {
-		return nil, err
-	}
-
-	// Find the server instance
-	var targetServer *server.Server
-	for _, srv := range s.servers {
-		if srv.ID() == serverInfo.ID {
-			targetServer = srv
-			break
-		}
-	}
-
-	if targetServer == nil {
-		return nil, fmt.Errorf("server not found: %s", serverInfo.ID)
-	}
-
-	// Generate connection ID
-	connID := fmt.Sprintf("conn-%s-%s", c.ID(), serverInfo.ID)
-
-	// Process request through server (includes rate limiting)
-	resp, err := targetServer.HandleRequest(ctx, connID, req)
-	if err != nil {
-		return resp, err
-	}
-
-	// Close connection if server instructs (max requests reached)
-	if resp.ShouldClose {
-		targetServer.CloseConnection(connID)
-	}
-
-	return resp, nil
 }
 
 func (s *Simulator) reportMetrics(ctx context.Context, done <-chan struct{}) {

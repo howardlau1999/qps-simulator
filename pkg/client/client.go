@@ -22,6 +22,8 @@ type Client struct {
 	maxRequestsPerConn int64
 	closed         bool
 	closeMu        sync.RWMutex
+	transport      Transport
+	sem            chan struct{} // Semaphore for concurrency limiting
 }
 
 type clientStats struct {
@@ -42,6 +44,8 @@ type ClientConfig struct {
 	MaxConnsPerServer  int
 	MaxRequestsPerConn int64
 	Headers            map[string]string
+	Transport          Transport
+	MaxConcurrency     int
 }
 
 // NewClient creates a new HTTP client simulator
@@ -53,13 +57,20 @@ func NewClient(config ClientConfig) *Client {
 		config.MaxConnsPerServer = 100
 	}
 
+	var sem chan struct{}
+	if config.MaxConcurrency > 0 {
+		sem = make(chan struct{}, config.MaxConcurrency)
+	}
+
 	return &Client{
 		id:                 config.ID,
 		loadBalancer:       config.LoadBalancer,
-		pool:               NewPool(config.MaxConnsPerServer, config.MaxRequestsPerConn),
+		pool:               NewPool(config.MaxConnsPerServer, config.MaxRequestsPerConn, config.Transport),
 		mode:               config.ConnectionMode,
 		headers:            config.Headers,
 		maxRequestsPerConn: config.MaxRequestsPerConn,
+		transport:          config.Transport,
+		sem:                sem,
 	}
 }
 
@@ -88,6 +99,16 @@ func (c *Client) Send(ctx context.Context, req *types.Request) (*types.Response,
 		return nil, fmt.Errorf("client is closed")
 	}
 	c.closeMu.RUnlock()
+
+	// Acquire semaphore if configured
+	if c.sem != nil {
+		select {
+		case c.sem <- struct{}{}:
+			defer func() { <-c.sem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 
 	start := time.Now()
 	atomic.AddInt64(&c.stats.totalRequests, 1)
@@ -132,7 +153,7 @@ func (c *Client) Send(ctx context.Context, req *types.Request) (*types.Response,
 	} else {
 		// Create a new connection for this request
 		connID := fmt.Sprintf("conn-%s-%d", server.ID, time.Now().UnixNano())
-		conn = NewConnection(connID, server.ID, c.maxRequestsPerConn)
+		conn = NewConnection(connID, server.ID, c.maxRequestsPerConn, c.transport)
 		atomic.AddInt64(&c.stats.connectionsOpened, 1)
 	}
 

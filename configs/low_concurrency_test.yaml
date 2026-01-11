@@ -1,0 +1,31 @@
+clients:
+  count: 1
+  requests_per_client: 1000
+  connection_mode: "reuse"
+  max_concurrency: 1      # Intention: Allow only 1 concurrent request
+  request_rate: 2000       # High enough to saturate
+  headers:
+    X-API-Key: "test-key"
+
+servers:
+  count: 10               # More servers than max_concurrency
+  max_requests_per_conn: 100000 
+  base_port: 9000
+  processing_time_ms: 10 # Slow enough to ensure concurrency builds up if allowed
+
+load_balancer:
+  algorithm: "round_robin"
+  max_conn_per_server: 100 # Allow plenty of connections per server
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 10000
+  burst: 1000
+
+simulation:
+  duration_seconds: 5
+  warmup_seconds: 0
+
+metrics:
+  enabled: true
+  interval_seconds: 1
