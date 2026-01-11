@@ -39,4 +39,4 @@ metrics:
   enabled: true
   interval_seconds: 1
   output_format: "json"
-  output_path: "./metrics_local_cached.json"
+  output_path: "./metrics_local_cached_bad_case.json"
