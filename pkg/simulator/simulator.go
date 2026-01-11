@@ -118,38 +118,14 @@ func New(cfg *config.Config) (*Simulator, error) {
 		connMode = types.ConnectionModePerRequest
 	case "hybrid":
 		connMode = types.ConnectionModeHybrid
+	case "dedicated":
+		connMode = types.ConnectionModeDedicated
 	default:
 		connMode = types.ConnectionModeReuse
 	}
 
-	// Create transport function to bridge client and server
-	transport := func(ctx context.Context, serverID, connID string, req *types.Request) (*types.Response, error) {
-		// Find the target server
-		var targetServer *server.Server
-		for _, srv := range servers {
-			if srv.ID() == serverID {
-				targetServer = srv
-				break
-			}
-		}
-
-		if targetServer == nil {
-			return nil, fmt.Errorf("server not found: %s", serverID)
-		}
-
-		// Process request through server
-		resp, err := targetServer.HandleRequest(ctx, connID, req)
-		if err != nil {
-			return resp, err
-		}
-
-		// Close connection if server instructs (max requests reached)
-		if resp.ShouldClose {
-			targetServer.CloseConnection(connID)
-		}
-
-		return resp, nil
-	}
+	// Create transport
+	transport := &simulatorTransport{servers: servers}
 
 	// Create clients
 	clients := make([]*client.Client, cfg.Clients.Count)
@@ -158,12 +134,25 @@ func New(cfg *config.Config) (*Simulator, error) {
 			ID:                 fmt.Sprintf("client-%d", i),
 			LoadBalancer:       lb,
 			ConnectionMode:     connMode,
+			ConnectionPoolStrategy: cfg.Clients.ConnectionPoolStrategy,
 			MaxConnsPerServer:  cfg.LoadBalancer.MaxConnPerServer / cfg.Clients.Count,
 			MaxRequestsPerConn: int64(cfg.Servers.MaxRequestsPerConn),
 			Headers:            cfg.Clients.Headers,
 			Transport:          transport,
-			MaxConcurrency:     cfg.Clients.MaxConcurrency,
+			MaxConcurrency:     1, // Force low concurrency for testing skew? No, use config.
 		}
+		
+		if cfg.Clients.MaxConnections > 0 {
+			// This is now passed as the global limit, not per-server
+			clientConfig.MaxConnections = cfg.Clients.MaxConnections
+		} else {
+             // Default behavior: no global limit? Or derive?
+             // Since we want to support existing behavior where everything was limited per server, 
+             // but if user didn't specify MaxConnections we assume they want per-server limits as configured in load balancer.
+             // But if we want NO global limit by default, we just pass 0.
+        }
+		// Oh, wait, I shouldn't override MaxConcurrency here.
+		clientConfig.MaxConcurrency = cfg.Clients.MaxConcurrency
 		clients[i] = client.NewClient(clientConfig)
 	}
 
@@ -268,76 +257,127 @@ func (s *Simulator) Run(ctx context.Context) error {
 func (s *Simulator) runClient(ctx context.Context, c *client.Client, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	requestsPerClient := s.config.Clients.RequestsPerClient
+	requestsPerClient := int64(s.config.Clients.RequestsPerClient)
 	testTimeSeconds := s.config.Clients.TestTimeSeconds
 	targetRate := s.config.Clients.RequestRate
-
-	// Calculate delay between requests to achieve target rate
-	var delay time.Duration
-	if targetRate > 0 {
-		delay = time.Second / time.Duration(targetRate)
+	maxConcurrency := s.config.Clients.MaxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
 	}
 
-	// Determine if using time-based or count-based testing
+	// Create rate limiter if needed
+	var rl types.RateLimiter
+	if targetRate > 0 {
+		// Use token bucket for smooth client-side rate limiting
+		// Burst equal to rate implies we allow 1s worth of requests to burst, which is reasonable
+		// or we can make it smaller. Using Rate as Burst is a safe default for "Target Rate".
+		rlConfig := types.RateLimiterConfig{
+			Rate:  int64(targetRate),
+			Burst: int64(targetRate),
+			Type:  "token_bucket",
+		}
+		var err error
+		rl, err = ratelimiter.NewTokenBucket(rlConfig)
+		if err != nil {
+			fmt.Printf("Error creating rate limiter for client %s: %v\n", c.ID(), err)
+			return
+		}
+	}
+
+	// Determine termination conditions
 	useTimeBased := requestsPerClient <= 0 && testTimeSeconds > 0
 	var clientDeadline time.Time
 	if useTimeBased {
 		clientDeadline = time.Now().Add(time.Duration(testTimeSeconds) * time.Second)
 	}
 
-	requestNum := 0
-	for {
-		// Check termination conditions
-		// Check termination conditions
-		if testTimeSeconds > 0 {
-			if time.Now().After(clientDeadline) {
-				return
+	var requestCounter int64 // Atomic counter for requests executed by this client's workers
+
+	// Worker coordination
+	var workerWg sync.WaitGroup
+	workerWg.Add(maxConcurrency)
+
+	for i := 0; i < maxConcurrency; i++ {
+		go func(workerID int) {
+			defer workerWg.Done()
+			
+			for {
+				// Check termination conditions
+				if useTimeBased {
+					if time.Now().After(clientDeadline) {
+						return
+					}
+				} else if requestsPerClient > 0 {
+					// Atomically check and increment
+					currentReq := atomic.AddInt64(&requestCounter, 1)
+					if currentReq > requestsPerClient {
+						return
+					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				// Rate limiting
+				if rl != nil {
+					for {
+						// Blocking wait for token
+						res, _ := rl.Allow(ctx, "client", nil)
+						if res.Allowed {
+							break
+						}
+						
+						wait := res.RetryAfter
+						if wait <= 0 {
+							wait = time.Millisecond
+						}
+						
+						select {
+						case <-time.After(wait):
+							// Retry loop
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+
+				reqID := fmt.Sprintf("req-%s-%d", c.ID(), atomic.AddInt64(&s.requestCount, 1))
+				req := &types.Request{
+					ID:        reqID,
+					ClientID:  c.ID(),
+					Headers:   make(map[string]string),
+					Timestamp: time.Now(),
+				}
+
+				// Add user ID header for rate limiting (can be overridden by config headers)
+				req.Headers["X-User-ID"] = c.ID()
+				
+				// Copy config headers (allows override of X-User-ID for global rate limiting)
+				for k, v := range s.config.Clients.Headers {
+					req.Headers[k] = v
+				}
+
+				// Add WorkerID to context
+				ctxWithWorker := context.WithValue(ctx, client.WorkerIDKey, workerID)
+
+				start := time.Now()
+				resp, err := c.Send(ctxWithWorker, req)
+				latency := time.Since(start)
+
+				if err != nil {
+					s.metrics.RecordFailedRequest()
+					continue
+				}
+
+				s.metrics.RecordRequest(c.ID(), "", latency, resp.RateLimited)
 			}
-		} else if requestsPerClient > 0 {
-			if requestNum >= requestsPerClient {
-				return
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		requestNum++
-		reqID := fmt.Sprintf("req-%s-%d", c.ID(), atomic.AddInt64(&s.requestCount, 1))
-		req := &types.Request{
-			ID:        reqID,
-			ClientID:  c.ID(),
-			Headers:   make(map[string]string),
-			Timestamp: time.Now(),
-		}
-
-		// Add user ID header for rate limiting (can be overridden by config headers)
-		req.Headers["X-User-ID"] = c.ID()
-		
-		// Copy config headers (allows override of X-User-ID for global rate limiting)
-		for k, v := range s.config.Clients.Headers {
-			req.Headers[k] = v
-		}
-
-		start := time.Now()
-		resp, err := c.Send(ctx, req)
-		latency := time.Since(start)
-
-		if err != nil {
-			s.metrics.RecordFailedRequest()
-			continue
-		}
-
-		s.metrics.RecordRequest(c.ID(), "", latency, resp.RateLimited)
-
-		// Rate limiting
-		if delay > 0 {
-			time.Sleep(delay)
-		}
+		}(i)
 	}
+
+	workerWg.Wait()
 }
 
 func (s *Simulator) reportMetrics(ctx context.Context, done <-chan struct{}) {
@@ -429,4 +469,45 @@ func (s *Simulator) Stop() error {
 // GetMetrics returns the current metrics snapshot
 func (s *Simulator) GetMetrics() *metrics.MetricsSnapshot {
 	return s.metrics.Snapshot()
+}
+// simulatorTransport implements client.Transport
+type simulatorTransport struct {
+	servers []*server.Server
+}
+
+func (t *simulatorTransport) Send(ctx context.Context, serverID, connID string, req *types.Request) (*types.Response, error) {
+	// Find the target server
+	var targetServer *server.Server
+	for _, srv := range t.servers {
+		if srv.ID() == serverID {
+			targetServer = srv
+			break
+		}
+	}
+
+	if targetServer == nil {
+		return nil, fmt.Errorf("server not found: %s", serverID)
+	}
+
+	// Process request through server
+	resp, err := targetServer.HandleRequest(ctx, connID, req)
+	if err != nil {
+		return resp, err
+	}
+
+	// Close connection if server instructs (max requests reached)
+	if resp.ShouldClose {
+		targetServer.CloseConnection(connID)
+	}
+
+	return resp, nil
+}
+
+func (t *simulatorTransport) CloseConnection(serverID, connID string) {
+	for _, srv := range t.servers {
+		if srv.ID() == serverID {
+			srv.CloseConnection(connID)
+			return
+		}
+	}
 }

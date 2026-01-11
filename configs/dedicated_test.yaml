@@ -1,0 +1,36 @@
+clients:
+  count: 5
+  requests_per_client: 100
+  test_time_seconds: 10
+  connection_mode: "dedicated"
+  connection_pool_strategy: "fifo"
+  request_rate: 100
+  max_concurrency: 5
+  max_connections: 0
+  headers:
+    X-User-ID: "dedicated-user"
+
+servers:
+  count: 2
+  max_requests_per_conn: 500
+  base_port: 8090
+  processing_time_ms: 10
+  processing_time_jitter_ms: 2
+  rate_limit_header_keys: ["X-User-ID"]
+
+load_balancer:
+  algorithm: "round_robin"
+  health_check_ms: 1000
+  max_conn_per_server: 10000
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 1000
+  burst: 1000
+  window_ms: 1000
+
+metrics:
+  enabled: true
+  interval_seconds: 1
+  output_format: "json"
+  output_path: "./metrics_dedicated.json"

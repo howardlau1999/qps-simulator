@@ -16,6 +16,8 @@ const (
 	ConnectionModePerRequest
 	// ConnectionModeHybrid allows switching between modes dynamically
 	ConnectionModeHybrid
+	// ConnectionModeDedicated assigns a persistent connection to each worker goroutine
+	ConnectionModeDedicated
 )
 
 // Request represents an HTTP request in the simulation
@@ -123,9 +125,12 @@ type Connection interface {
 
 // ConnectionPool manages a pool of connections
 type ConnectionPool interface {
-	// Get retrieves or creates a connection to the specified server
-	Get(ctx context.Context, server *ServerInfo) (Connection, error)
+	// Get retrieves a connection from the pool (load balanced)
+	Get(ctx context.Context) (Connection, error)
 	
+	// Create creates a new connection (load balanced, not pooled)
+	Create(ctx context.Context) (Connection, error)
+
 	// Put returns a connection to the pool
 	Put(conn Connection) error
 	

@@ -25,9 +25,11 @@ type ClientsConfig struct {
 	RequestsPerClient int               `yaml:"requests_per_client"` // 0 = unlimited (use test_time_seconds)
 	TestTimeSeconds   int               `yaml:"test_time_seconds"`   // Duration to run (alternative to requests_per_client)
 	ConnectionMode    string            `yaml:"connection_mode"`     // reuse, per_request, hybrid
+	ConnectionPoolStrategy string       `yaml:"connection_pool_strategy"` // fifo (default), lifo
 	MaxConcurrency    int               `yaml:"max_concurrency"`     // Max concurrent requests per client
 	Headers           map[string]string `yaml:"headers"`
 	RequestRate       int               `yaml:"request_rate"` // Target requests per second per client
+	MaxConnections    int               `yaml:"max_connections"` // Max total connections per client (global)
 }
 
 // ServersConfig configures the server simulator
@@ -97,6 +99,7 @@ func DefaultConfig() *Config {
 			Count:             10,
 			RequestsPerClient: 10000,
 			ConnectionMode:    "reuse",
+			ConnectionPoolStrategy: "fifo",
 			MaxConcurrency:    100,
 			RequestRate:       1000,
 			Headers:           make(map[string]string),
@@ -182,9 +185,17 @@ func (c *Config) Validate() error {
 		c.RateLimiter.Shards = 256
 	}
 	
-	validModes := map[string]bool{"reuse": true, "per_request": true, "hybrid": true}
+	validModes := map[string]bool{"reuse": true, "per_request": true, "hybrid": true, "dedicated": true}
 	if !validModes[c.Clients.ConnectionMode] {
 		return fmt.Errorf("invalid connection_mode: %s", c.Clients.ConnectionMode)
+	}
+
+	validStrategies := map[string]bool{"fifo": true, "lifo": true}
+	if c.Clients.ConnectionPoolStrategy != "" && !validStrategies[c.Clients.ConnectionPoolStrategy] {
+		return fmt.Errorf("invalid connection_pool_strategy: %s", c.Clients.ConnectionPoolStrategy)
+	}
+	if c.Clients.ConnectionPoolStrategy == "" {
+		c.Clients.ConnectionPoolStrategy = "fifo"
 	}
 	
 	validAlgorithms := map[string]bool{

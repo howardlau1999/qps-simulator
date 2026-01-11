@@ -10,8 +10,11 @@ import (
 	"github.com/howardlau1999/qps-simulator/pkg/types"
 )
 
-// Transport defines the function signature for sending requests
-type Transport func(ctx context.Context, serverID, connID string, req *types.Request) (*types.Response, error)
+// Transport defines the interface for communicating with the server
+type Transport interface {
+	Send(ctx context.Context, serverID, connID string, req *types.Request) (*types.Response, error)
+	CloseConnection(serverID, connID string)
+}
 
 // Connection represents a simulated client-server connection
 type Connection struct {
@@ -86,7 +89,7 @@ func (c *Connection) Send(ctx context.Context, req *types.Request) (*types.Respo
 		return nil, fmt.Errorf("no transport configured")
 	}
 
-	resp, err := c.transport(ctx, c.serverID, c.id, req)
+	resp, err := c.transport.Send(ctx, c.serverID, c.id, req)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +104,15 @@ func (c *Connection) Send(ctx context.Context, req *types.Request) (*types.Respo
 func (c *Connection) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
 	c.closed = true
+	
+	if c.transport != nil {
+		c.transport.CloseConnection(c.serverID, c.id)
+	}
+	
 	return nil
 }
 
@@ -109,94 +120,170 @@ func (c *Connection) Close() error {
 // Connection Pool
 // ============================================================================
 
-// Pool manages a pool of connections per server
+// Pool manages a pool of connections
 type Pool struct {
-	maxConnsPerServer int
+	maxConnsPerServer  int // Not strictly enforced by Pool anymore if we pass limit responsibility? 
+    // Wait, the user said "connection pool should also be unaware of which server it connects to".
+    // Does it still need to enforce "max conns per server"?
+    // If it's unaware, maybe it doesn't enforce per-server limit?
+    // "Support setting max connections count for per client connection pool" (Global) was the previous goal.
+    // If I just enforce global, I don't need to track per-server counts in map.
+    // But `maxConnsPerServer` config still exists. If the pool is unaware, the client must enforce it?
+    // Or maybe we treat `maxConnsPerServer` as irrelevant now that we have global `MaxConnections`.
+    // Let's assume for now we only care about Global Limit in the Pool, OR we just scan to count?
+    // Scanning to count per-server is O(N) but N is small (100).
+    // Let's keep `maxConnsPerServer` for backward compatibility if needed, but primarily use Global.
+    // Actually, if we don't have a map, checking per-server count requires iteration.
 	maxRequestsPerConn int64
-	pools             map[string]*serverPool
-	mu                sync.RWMutex
-	stats             types.ConnectionPoolStats
-	closed            bool
-	transport         Transport
-}
-
-type serverPool struct {
-	serverID    string
-	connections chan *Connection
-	active      int64
-	total       int64
-	mu          sync.Mutex
+	maxTotalConnections int
+	
+    idleConnections    []*Connection
+	mu                 sync.RWMutex
+	stats              types.ConnectionPoolStats
+	closed             bool
+	transport          Transport
+	strategy           string
+    // Removed LoadBalancer and clientID (maybe clientID is useful for logging? kept it)
+	clientID           string
+	globalCond         *sync.Cond
 }
 
 // NewPool creates a new connection pool
-func NewPool(maxConnsPerServer int, maxRequestsPerConn int64, transport Transport) *Pool {
-	if maxConnsPerServer <= 0 {
-		maxConnsPerServer = 100
-	}
+func NewPool(clientID string, maxRequestsPerConn int64, transport Transport, strategy string, maxTotalConnections int) *Pool {
 	if maxRequestsPerConn <= 0 {
 		maxRequestsPerConn = 150
 	}
-
-	return &Pool{
-		maxConnsPerServer:  maxConnsPerServer,
-		maxRequestsPerConn: maxRequestsPerConn,
-		pools:              make(map[string]*serverPool),
-		transport:          transport,
+	if strategy == "" {
+		strategy = "fifo"
 	}
+
+	p := &Pool{
+		maxRequestsPerConn:  maxRequestsPerConn,
+		maxTotalConnections: maxTotalConnections,
+		idleConnections:     make([]*Connection, 0),
+		transport:           transport,
+		strategy:            strategy,
+		clientID:            clientID,
+	}
+	p.globalCond = sync.NewCond(&p.mu)
+	return p
 }
 
-func (p *Pool) getServerPool(serverID string) *serverPool {
-	p.mu.RLock()
-	sp, ok := p.pools[serverID]
-	p.mu.RUnlock()
-
-	if ok {
-		return sp
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Double-check after acquiring write lock
-	if sp, ok = p.pools[serverID]; ok {
-		return sp
-	}
-
-	sp = &serverPool{
-		serverID:    serverID,
-		connections: make(chan *Connection, p.maxConnsPerServer),
-	}
-	p.pools[serverID] = sp
-	return sp
-}
-
-// Get retrieves or creates a connection to the specified server
-func (p *Pool) Get(ctx context.Context, server *types.ServerInfo) (types.Connection, error) {
+// Get retrieves a reusable connection or creates a new one using the picker
+func (p *Pool) Get(ctx context.Context, picker func() (string, error)) (types.Connection, error) {
 	if p.closed {
 		return nil, fmt.Errorf("pool is closed")
 	}
 
-	sp := p.getServerPool(server.ID)
-
-	// Try to get an existing connection
-	select {
-	case conn := <-sp.connections:
-		if !conn.ShouldClose() {
-			atomic.AddInt64(&sp.active, 1)
-			return conn, nil
+	p.mu.Lock()
+	
+	// 1. Try to reuse ANY idle connection
+	if len(p.idleConnections) > 0 {
+		// Pop the last one (LIFO) or first one (FIFO)
+		// Strategy check
+		var conn *Connection
+		idx := 0
+		if p.strategy == "lifo" {
+			idx = len(p.idleConnections) - 1
 		}
-		// Connection is at max requests, close it
-		conn.Close()
+		
+		conn = p.idleConnections[idx]
+		
+		// Remove from slice
+		if p.strategy == "lifo" {
+			p.idleConnections = p.idleConnections[:idx]
+		} else {
+			p.idleConnections = p.idleConnections[1:]
+		}
+		
+		p.mu.Unlock()
+		
+		// Just reuse it, assuming it's healthy.
+		// If it needs to stay open, TotalConnections remains same.
+		return conn, nil
+	}
+	
+	// 2. No idle connection. Must create new.
+	// Check global limit
+	if p.maxTotalConnections > 0 {
+		for {
+			total := atomic.LoadInt64(&p.stats.TotalConnections)
+			if total < int64(p.maxTotalConnections) {
+				break
+			}
+			
+			// Try to evict an idle connection to make room
+			// Wait... if we are here, len(idleConnections) was 0 just a moment ago.
+			// But maybe someone returned one while we were checking atomic?
+			// Re-check idleConnections under lock?
+			// But we are under lock!
+			// So if len(p.idleConnections) == 0, we can't evict anything!
+			// We MUST wait.
+			
+			// Wait, another thread might have put one back?
+			// So we loop.
+			
+			// Ah, if len > 0, we should have just taken it in step 1?
+			// No, because we entered step 2.
+			
+			// So the logic inside loop:
+			// If idle > 0, TAKE IT (reuse). Don't Create.
+			if len(p.idleConnections) > 0 {
+				// We found one while waiting! Use it!
+				// Same logic as step 1
+				var conn *Connection
+				idx := 0
+				if p.strategy == "lifo" {
+					idx = len(p.idleConnections) - 1
+				}
+				conn = p.idleConnections[idx]
+				if p.strategy == "lifo" {
+					p.idleConnections = p.idleConnections[:idx]
+				} else {
+					p.idleConnections = p.idleConnections[1:]
+				}
+				p.mu.Unlock()
+				return conn, nil
+			}
+			
+			// Limit reached and no idle connections to evict?
+			// We block.
+			p.globalCond.Wait()
+			if p.closed {
+				p.mu.Unlock()
+				return nil, fmt.Errorf("pool is closed")
+			}
+		}
+	}
+	
+	// We are allowed to create a new connection.
+	// We are holding the lock.
+	// Reserve the slot.
+	atomic.AddInt64(&p.stats.TotalConnections, 1)
+	p.mu.Unlock()
+
+	// 3. Pick server (Load Balancing) - outside lock
+	serverID, err := picker()
+	if err != nil {
+		// Failed to pick, revert reservation
 		atomic.AddInt64(&p.stats.TotalConnections, -1)
-	default:
+		// Signal? Maybe someone else can use it (unlikely if we failed to pick, but safe)
+		// Actually if pick failed, we just decrement.
+		p.globalCond.Signal()
+		return nil, err
 	}
 
-	// Create new connection
-	connID := fmt.Sprintf("conn-%s-%d", server.ID, atomic.AddInt64(&sp.total, 1))
-	conn := NewConnection(connID, server.ID, p.maxRequestsPerConn, p.transport)
-	atomic.AddInt64(&p.stats.TotalConnections, 1)
-	atomic.AddInt64(&sp.active, 1)
-	return conn, nil
+	connID := fmt.Sprintf("conn-%s-%s-%d", p.clientID, serverID, time.Now().UnixNano())
+	return NewConnection(connID, serverID, p.maxRequestsPerConn, p.transport), nil
+}
+
+// Create creates a new connection directly
+func (p *Pool) Create(ctx context.Context, serverID string) (types.Connection, error) {
+	if p.closed {
+		return nil, fmt.Errorf("pool is closed")
+	}
+	connID := fmt.Sprintf("conn-%s-%s-%d", p.clientID, serverID, time.Now().UnixNano())
+	return NewConnection(connID, serverID, p.maxRequestsPerConn, p.transport), nil
 }
 
 // Put returns a connection to the pool
@@ -210,40 +297,76 @@ func (p *Pool) Put(conn types.Connection) error {
 		return conn.Close()
 	}
 
-	sp := p.getServerPool(c.ServerID())
-	atomic.AddInt64(&sp.active, -1)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	
+	if p.closed {
+		return c.Close()
+	}
 
 	if c.ShouldClose() {
+		// Connection should effectively be removed from pool counting
 		atomic.AddInt64(&p.stats.TotalConnections, -1)
+		
+		// Signal potential waiter that a slot might be free
+		p.globalCond.Signal()
+
 		return c.Close()
 	}
 
-	// Try to return to pool
-	select {
-	case sp.connections <- c:
-		return nil
-	default:
-		// Pool is full, close connection
-		atomic.AddInt64(&p.stats.TotalConnections, -1)
-		return c.Close()
-	}
+	// Return to pool list
+	p.idleConnections = append(p.idleConnections, c)
+	
+	// Signal waiters:
+	// 1. Waiters blocked on Global Limit might need to wake up to evict this new idle connection if they need a slot.
+	// 2. Waiters potentially cycling (though we don't have explicit server-waiters anymore).
+	// Since Get scans idle list, we should wake them up.
+	p.globalCond.Broadcast()
+
+	return nil
 }
 
 // Close closes all connections in the pool
 func (p *Pool) Close() error {
 	p.mu.Lock()
 	p.closed = true
-	pools := p.pools
-	p.pools = make(map[string]*serverPool)
+	conns := p.idleConnections
+	p.idleConnections = nil // Clear
 	p.mu.Unlock()
 
-	for _, sp := range pools {
-		close(sp.connections)
-		for conn := range sp.connections {
-			conn.Close()
-		}
+	for _, conn := range conns {
+		conn.Close()
 	}
+	
+	p.globalCond.Broadcast()
 	return nil
+}
+
+// evictOneIdleConnection tries to close one idle connection
+// Returns true if a connection was evicted, false otherwise.
+func (p *Pool) evictOneIdleConnection() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	
+	if len(p.idleConnections) > 0 {
+		conn := p.idleConnections[0]
+		p.idleConnections = p.idleConnections[1:]
+		
+		// Remove from stats? 
+		// Caller of evict (Get) usually expects slot to be freed.
+		// "evict" implies removing from pool to make space.
+		// So yes, decrement total.
+		atomic.AddInt64(&p.stats.TotalConnections, -1)
+		
+		// Unlock to close (avoid holding lock) - wait, we deferred unlock.
+		// Can't close inside lock efficiently if close is slow.
+		// But for now keeping it simple.
+		conn.Close()
+		
+		p.globalCond.Signal()
+		return true
+	}
+	return false
 }
 
 // Stats returns pool statistics
@@ -251,14 +374,15 @@ func (p *Pool) Stats() types.ConnectionPoolStats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	var active, idle int64
-	for _, sp := range p.pools {
-		active += atomic.LoadInt64(&sp.active)
-		idle += int64(len(sp.connections))
+	total := atomic.LoadInt64(&p.stats.TotalConnections)
+	idle := int64(len(p.idleConnections))
+	active := total - idle
+	if active < 0 {
+		active = 0
 	}
 
 	return types.ConnectionPoolStats{
-		TotalConnections:  atomic.LoadInt64(&p.stats.TotalConnections),
+		TotalConnections:  total,
 		ActiveConnections: active,
 		IdleConnections:   idle,
 		TotalRequests:     atomic.LoadInt64(&p.stats.TotalRequests),

@@ -1,0 +1,35 @@
+clients:
+  count: 2
+  requests_per_client: 50
+  connection_mode: "reuse"
+  connection_pool_strategy: "fifo"
+  request_rate: 100
+  max_concurrency: 10
+  max_connections: 5   # Explictly limited to 5 connections per server (Global)
+  headers:
+    X-User-ID: "static-user"
+
+servers:
+  count: 2
+  max_requests_per_conn: 100
+  base_port: 8080
+  processing_time_ms: 10
+  processing_time_jitter_ms: 0
+  rate_limit_header_keys: ["X-User-ID"]
+
+load_balancer:
+  algorithm: "round_robin"
+  health_check_ms: 1000
+  max_conn_per_server: 100 # This should be overridden by max_connections: 5
+
+rate_limiter:
+  type: "token_bucket"
+  rate: 1000
+  burst: 1000
+  window_ms: 1000
+  
+metrics:
+  enabled: true
+  interval_seconds: 1
+  output_format: "json"
+  output_path: "./metrics_max_conn_test.json"
