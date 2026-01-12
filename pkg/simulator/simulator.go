@@ -430,13 +430,9 @@ func (s *Simulator) reportMetrics(ctx context.Context, done <-chan struct{}) {
 	// File recording is fixed at 1s interval as per requirement
 	fileInterval := time.Second
 
-	// Use the smaller interval for the ticker to ensure we hit all deadlines
-	tickInterval := time.Second
-	if consoleInterval < tickInterval {
-		tickInterval = consoleInterval
-	}
-
-	ticker := time.NewTicker(tickInterval)
+	// Use a faster tick to check wall clock more frequently
+	// This ensures we don't miss the interval boundary
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	// Initialize to past time so first tick triggers report
@@ -449,19 +445,30 @@ func (s *Simulator) reportMetrics(ctx context.Context, done <-chan struct{}) {
 			return
 		case <-done:
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
+			// Use wall-clock time for accurate interval checking
+			now := time.Now()
+
+			// Check if it's time to report (using wall clock, not ticker time)
+			shouldReportConsole := now.Sub(lastConsoleReport) >= consoleInterval
+			shouldRecordFile := s.metricsWriter != nil && now.Sub(lastFileRecord) >= fileInterval
+
+			if !shouldReportConsole && !shouldRecordFile {
+				continue // Skip expensive Snapshot() if not needed
+			}
+
 			snapshot := s.metrics.Snapshot()
 			// Add server connection counts
 			snapshot.ActiveConnections, snapshot.TotalConnections, snapshot.ClosedConnections = s.getConnectionStats()
 
 			// Record to file every 1s
-			if s.metricsWriter != nil && now.Sub(lastFileRecord) >= fileInterval {
+			if shouldRecordFile {
 				s.metricsWriter.AddSnapshot(*snapshot)
 				lastFileRecord = now
 			}
 
 			// Report to console at configured interval
-			if now.Sub(lastConsoleReport) >= consoleInterval {
+			if shouldReportConsole {
 				fmt.Printf("[%v] %s\n", snapshot.Duration.Round(time.Second), snapshot.String())
 				lastConsoleReport = now
 			}
