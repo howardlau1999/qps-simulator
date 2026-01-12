@@ -240,6 +240,13 @@
             </div>
 
             <div class="chart-card">
+                <h3>🔒 Rate Limit & Fetch QPS</h3>
+                <div class="chart-container">
+                    <canvas id="rlFetchQpsChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
                 <h3>📊 Request Distribution</h3>
                 <div class="chart-container">
                     <canvas id="distributionChart"></canvas>
@@ -514,6 +521,65 @@
                     scales: {
                         x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } },
                         y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } }
+                    }
+                }
+            });
+
+            // RL Check & Fetch QPS chart
+            charts.rlFetchQps = new Chart(document.getElementById('rlFetchQpsChart'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'RL Check QPS',
+                            data: snapshots.map(s => s.rate_limit_check_qps || 0),
+                            borderColor: '#8b5cf6',
+                            backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Remote Fetch QPS',
+                            data: snapshots.map(s => s.remote_fetch_qps || 0),
+                            borderColor: '#ec4899',
+                            backgroundColor: 'rgba(236, 72, 153, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Avg Token Fetch Waiters',
+                            data: snapshots.map(s => s.avg_token_fetch_waiters || 0),
+                            borderColor: '#06b6d4',
+                            borderDash: [5, 5],
+                            tension: 0.4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: { display: true, text: 'Rate Limit Check & Remote Fetch QPS', color: '#94a3b8' },
+                        legend: { labels: { color: '#94a3b8' } }
+                    },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148, 163, 184, 0.1)' } },
+                        y: {
+                            type: 'linear',
+                            position: 'left',
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: 'rgba(148, 163, 184, 0.1)' },
+                            title: { display: true, text: 'QPS', color: '#94a3b8' }
+                        },
+                        y1: {
+                            type: 'linear',
+                            position: 'right',
+                            ticks: { color: '#06b6d4' },
+                            grid: { drawOnChartArea: false },
+                            title: { display: true, text: 'Waiters', color: '#06b6d4' }
+                        }
                     }
                 }
             });
