@@ -439,8 +439,9 @@ func (s *Simulator) reportMetrics(ctx context.Context, done <-chan struct{}) {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
-	lastConsoleReport := time.Now()
-	lastFileRecord := time.Now()
+	// Initialize to past time so first tick triggers report
+	lastConsoleReport := time.Now().Add(-consoleInterval)
+	lastFileRecord := time.Now().Add(-fileInterval)
 
 	for {
 		select {
